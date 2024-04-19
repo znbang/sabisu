@@ -3,15 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
-	"github.com/kardianos/service"
-	"github.com/znbang/logtate"
-	"golang.org/x/sys/windows/registry"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"time"
+
+	"github.com/kardianos/service"
+	"github.com/znbang/logtate"
+	"golang.org/x/sys/windows/registry"
 )
 
 var _ service.Interface = (*program)(nil)
@@ -37,6 +39,7 @@ func (p *program) Start(s service.Service) error {
 			MaxBackup: p.config.Log.MaxBackup,
 			MaxSize:   p.config.Log.MaxSize,
 		}))
+
 	}
 
 	log.Println("starting service")
@@ -103,9 +106,13 @@ func (p *program) runCommand() error {
 	p.cmd.Env = append(os.Environ(), p.config.Exec.Envs...)
 	p.cmd.Dir = p.exeDir
 
+	stdinPipe, err := p.cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("get stdin pipe failed: %w", err)
+	}
+
 	if stdoutPipe, err := p.cmd.StdoutPipe(); err != nil {
-		log.Println("get stdout pipe failed:", err)
-		return err
+		return fmt.Errorf("get stdout pipe failed: %w", err)
 	} else {
 		go func() {
 			scanner := bufio.NewScanner(stdoutPipe)
@@ -116,8 +123,7 @@ func (p *program) runCommand() error {
 	}
 
 	if stderrPipe, err := p.cmd.StderrPipe(); err != nil {
-		log.Println("get stderr pipe failed:", err)
-		return err
+		return fmt.Errorf("get stderr pipe failed: %w", err)
 	} else {
 		go func() {
 			scanner := bufio.NewScanner(stderrPipe)
@@ -130,8 +136,8 @@ func (p *program) runCommand() error {
 	log.Println("exec:", p.cmd.Path)
 
 	if err := p.cmd.Run(); err != nil {
-		log.Println("exec failed:", err)
-		return err
+		stdinPipe.Close()
+		return fmt.Errorf("exec failed: %w", err)
 	}
 
 	return nil
@@ -146,13 +152,17 @@ func (p *program) run() {
 		}
 	}()
 
-	p.runCommand()
+	if err := p.runCommand(); err != nil {
+		log.Println(err)
+	}
 
 	if p.config.Service.ExecRetry {
 		for retryCount := 0; retryCount < p.config.Service.ExecMaxRetry || p.config.Service.ExecMaxRetry == 0; retryCount++ {
 			time.Sleep(time.Second)
 			log.Printf("retry %d...\n", retryCount+1)
-			p.runCommand()
+			if err := p.runCommand(); err != nil {
+				log.Println(err)
+			}
 		}
 	}
 }
@@ -161,7 +171,11 @@ func (p *program) Stop(s service.Service) error {
 	// Stop should not block. Return with a few seconds.
 	log.Println("stopping service")
 	if p.cmd.Process != nil {
-		p.cmd.Process.Kill()
+		log.Println("kill")
+		err := p.cmd.Process.Kill()
+		if err != nil {
+			log.Println("kill process failed:", err)
+		}
 	}
 	if service.Interactive() {
 		os.Exit(0)
