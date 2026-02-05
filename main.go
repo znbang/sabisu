@@ -138,7 +138,9 @@ func main() {
 		svcConfig.Option[service.StartType] = service.ServiceStartAutomatic
 	}
 
-	prg := &program{}
+	prg := &program{
+		configPath: configAbsPath,
+	}
 	prg.exeDir, err = getExeDir()
 	if err != nil {
 		log.Fatal(err)

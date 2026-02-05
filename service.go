@@ -20,10 +20,11 @@ var _ service.Interface = (*program)(nil)
 var _ service.Shutdowner = (*program)(nil)
 
 type program struct {
-	config  *Config
-	service service.Service
-	cmd     *exec.Cmd
-	exeDir  string
+	configPath string
+	config     *Config
+	service    service.Service
+	cmd        *exec.Cmd
+	exeDir     string
 }
 
 func (p *program) Start(s service.Service) error {
@@ -160,6 +161,18 @@ func (p *program) run() {
 		for retryCount := 0; retryCount < p.config.Service.ExecMaxRetry || p.config.Service.ExecMaxRetry == 0; retryCount++ {
 			time.Sleep(time.Second)
 			log.Printf("retry %d...\n", retryCount+1)
+
+			// Reload config
+			if newConfig, err := loadConfig(p.configPath); err != nil {
+				log.Printf("failed to reload config: %v, using existing config\n", err)
+			} else {
+				p.config = newConfig
+				if !p.config.Service.ExecRetry {
+					log.Println("retry disabled in new config, stopping")
+					break
+				}
+			}
+
 			if err := p.runCommand(); err != nil {
 				log.Println(err)
 			}
