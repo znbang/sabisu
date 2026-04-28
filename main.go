@@ -41,7 +41,7 @@ func getAction() string {
 	switch action {
 	case "-c", "--console", "-s", "--service":
 		action = ""
-	case "-t", "-start":
+	case "-t", "--start":
 		action = ActionStart
 	case "-p", "--stop":
 		action = ActionStop
