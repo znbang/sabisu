@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/kardianos/service"
@@ -25,6 +27,7 @@ type program struct {
 	service    service.Service
 	cmd        *exec.Cmd
 	exeDir     string
+	stopping   atomic.Bool
 }
 
 func (p *program) Start(s service.Service) error {
@@ -107,45 +110,63 @@ func (p *program) runCommand() error {
 	p.cmd.Env = append(os.Environ(), p.config.Exec.Envs...)
 	p.cmd.Dir = p.exeDir
 
-	stdinPipe, err := p.cmd.StdinPipe()
+	stdoutPipe, err := p.cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("get stdin pipe failed: %w", err)
-	}
-
-	if stdoutPipe, err := p.cmd.StdoutPipe(); err != nil {
 		return fmt.Errorf("get stdout pipe failed: %w", err)
-	} else {
-		go func() {
-			scanner := bufio.NewScanner(stdoutPipe)
-			for scanner.Scan() {
-				log.Println(scanner.Text())
-			}
-		}()
 	}
 
-	if stderrPipe, err := p.cmd.StderrPipe(); err != nil {
+	stderrPipe, err := p.cmd.StderrPipe()
+	if err != nil {
 		return fmt.Errorf("get stderr pipe failed: %w", err)
-	} else {
-		go func() {
-			scanner := bufio.NewScanner(stderrPipe)
-			for scanner.Scan() {
-				log.Println(scanner.Text())
-			}
-		}()
 	}
 
 	log.Println("exec:", p.cmd.Path)
 
-	if err := p.cmd.Run(); err != nil {
-		stdinPipe.Close()
+	if err := p.cmd.Start(); err != nil {
+		return fmt.Errorf("exec start failed: %w", err)
+	}
+
+	stdoutDone := scanPipe(stdoutPipe, "stdout")
+	stderrDone := scanPipe(stderrPipe, "stderr")
+
+	stdoutErr := <-stdoutDone
+	stderrErr := <-stderrDone
+
+	if stdoutErr != nil {
+		log.Println(stdoutErr)
+	}
+	if stderrErr != nil {
+		log.Println(stderrErr)
+	}
+
+	if err := p.cmd.Wait(); err != nil {
 		return fmt.Errorf("exec failed: %w", err)
 	}
 
 	return nil
 }
 
+func scanPipe(pipe io.Reader, name string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(pipe)
+		for scanner.Scan() {
+			log.Println(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			done <- fmt.Errorf("%s scan failed: %w", name, err)
+			return
+		}
+		done <- nil
+	}()
+	return done
+}
+
 func (p *program) run() {
 	defer func() {
+		if p.stopping.Load() {
+			return
+		}
 		if service.Interactive() {
 			p.Stop(p.service)
 		} else {
@@ -157,9 +178,21 @@ func (p *program) run() {
 		log.Println(err)
 	}
 
+	if p.stopping.Load() {
+		return
+	}
+
 	if p.config.Service.ExecRetry {
 		for retryCount := 0; retryCount < p.config.Service.ExecMaxRetry || p.config.Service.ExecMaxRetry == 0; retryCount++ {
+			if p.stopping.Load() {
+				return
+			}
+
 			time.Sleep(time.Second)
+			if p.stopping.Load() {
+				return
+			}
+
 			log.Printf("retry %d...\n", retryCount+1)
 
 			// Reload config
@@ -182,9 +215,9 @@ func (p *program) run() {
 
 func (p *program) Stop(s service.Service) error {
 	// Stop should not block. Return with a few seconds.
+	p.stopping.Store(true)
 	log.Println("stopping service")
-	if p.cmd.Process != nil {
-		log.Println("kill")
+	if p.cmd != nil && p.cmd.Process != nil {
 		err := p.cmd.Process.Kill()
 		if err != nil {
 			log.Println("kill process failed:", err)
