@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -27,10 +26,13 @@ type program struct {
 	service    service.Service
 	cmd        *exec.Cmd
 	exeDir     string
+	logWriter  io.Writer
 	stopping   atomic.Bool
 }
 
 func (p *program) Start(s service.Service) error {
+	p.logWriter = log.Writer()
+
 	// log to file when running as service
 	if !service.Interactive() {
 		logAbsPath, err := getAbsPath(p.config.Log.Path)
@@ -38,11 +40,12 @@ func (p *program) Start(s service.Service) error {
 			log.Fatal(err)
 		}
 
-		log.SetOutput(logtate.New(logtate.Option{
+		p.logWriter = logtate.New(logtate.Option{
 			Path:      logAbsPath,
 			MaxBackup: p.config.Log.MaxBackup,
 			MaxSize:   p.config.Log.MaxSize,
-		}))
+		})
+		log.SetOutput(p.logWriter)
 
 	}
 
@@ -109,57 +112,16 @@ func (p *program) runCommand() error {
 	p.cmd = exec.CommandContext(ctx, getCmdPath(p.config.Exec.Command), p.config.Exec.Args...)
 	p.cmd.Env = append(os.Environ(), p.config.Exec.Envs...)
 	p.cmd.Dir = p.exeDir
-
-	stdoutPipe, err := p.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("get stdout pipe failed: %w", err)
-	}
-
-	stderrPipe, err := p.cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("get stderr pipe failed: %w", err)
-	}
+	p.cmd.Stdout = p.logWriter
+	p.cmd.Stderr = p.logWriter
 
 	log.Println("exec:", p.cmd.Path)
 
-	if err := p.cmd.Start(); err != nil {
-		return fmt.Errorf("exec start failed: %w", err)
-	}
-
-	stdoutDone := scanPipe(stdoutPipe, "stdout")
-	stderrDone := scanPipe(stderrPipe, "stderr")
-
-	stdoutErr := <-stdoutDone
-	stderrErr := <-stderrDone
-
-	if stdoutErr != nil {
-		log.Println(stdoutErr)
-	}
-	if stderrErr != nil {
-		log.Println(stderrErr)
-	}
-
-	if err := p.cmd.Wait(); err != nil {
+	if err := p.cmd.Run(); err != nil {
 		return fmt.Errorf("exec failed: %w", err)
 	}
 
 	return nil
-}
-
-func scanPipe(pipe io.Reader, name string) <-chan error {
-	done := make(chan error, 1)
-	go func() {
-		scanner := bufio.NewScanner(pipe)
-		for scanner.Scan() {
-			log.Println(scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			done <- fmt.Errorf("%s scan failed: %w", name, err)
-			return
-		}
-		done <- nil
-	}()
-	return done
 }
 
 func (p *program) run() {
